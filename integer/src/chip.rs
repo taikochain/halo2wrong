@@ -4,7 +4,7 @@ use super::{AssignedInteger, AssignedLimb, UnassignedInteger};
 use crate::instructions::{IntegerInstructions, Range};
 use crate::rns::{Common, Integer, Rns};
 use halo2::halo2curves::ff::PrimeField;
-use halo2::plonk::Error;
+use halo2::{circuit::Value, plonk::Error};
 use maingate::{halo2, AssignedCondition, AssignedValue, MainGateInstructions, RegionCtx};
 use maingate::{MainGate, MainGateConfig};
 use maingate::{RangeChip, RangeConfig};
@@ -85,7 +85,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         ctx: &mut RegionCtx<'_, N>,
         // TODO: external integer might have different parameter settings
         a: &AssignedInteger<T, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
-    ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error> {
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
         let to_be_reduced = self.new_assigned_integer(a.limbs(), a.native().clone());
         self.reduce(ctx, &to_be_reduced)
     }
@@ -96,7 +96,20 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         integer: UnassignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
         range: Range,
     ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error> {
-        self.assign_integer_generic(ctx, integer, range)
+        let main_gate = self.main_gate();
+        let (result, succeeded) = self.assign_integer_generic(ctx, integer, range)?;
+        main_gate.assert_not_zero(ctx, &succeeded)?;
+        Ok(result)
+    }
+
+    fn try_assign_integer(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        integer: UnassignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+        range: Range,
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
+        let (result, succeeded) = self.assign_integer_generic(ctx, integer, range)?;
+        Ok((result, succeeded))
     }
 
     fn assign_constant(
@@ -348,7 +361,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         &self,
         ctx: &mut RegionCtx<'_, N>,
         a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
-    ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error> {
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
         self.reduce_generic(ctx, a)
     }
 
@@ -376,6 +389,21 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         Ok(())
     }
 
+    fn is_strict_equal(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+        b: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error> {
+        let main_gate = self.main_gate();
+        let mut result = main_gate.assign_value(ctx, Value::known(N::ONE))?;
+        for idx in 0..NUMBER_OF_LIMBS {
+            let term_1 = main_gate.is_equal(ctx, a.limb(idx), b.limb(idx))?;
+            result = main_gate.and(ctx, &result, &term_1)?;
+        }
+        Ok(result)
+    }
+
     fn assert_not_equal(
         &self,
         ctx: &mut RegionCtx<'_, N>,
@@ -396,6 +424,50 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         let a = &self.reduce_if_max_operand_value_exceeds(ctx, a)?;
         self.assert_not_zero_generic(ctx, a)?;
         Ok(())
+    }
+
+    fn is_not_zero(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error> {
+        let main_gate = self.main_gate();
+        let (a, is_reduce_succeeded) = &self.try_reduce(ctx, a)?;
+        let zero = self.assign_constant(ctx, W::ZERO)?;
+        let is_zero = self.is_strict_equal(ctx, &zero, &a)?;
+        let result = main_gate.not(ctx, &is_zero)?;
+        main_gate.and(ctx, &result, is_reduce_succeeded)
+    }
+
+    fn is_not_zero_without_reduce(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error> {
+        let main_gate = self.main_gate();
+        let zero = self.assign_constant(ctx, W::ZERO)?;
+        let is_zero = self.is_strict_equal(ctx, &zero, &a)?;
+        main_gate.not(ctx, &is_zero)
+    }
+
+    fn one_or_one(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedCondition<N>,
+        b: &AssignedCondition<N>,
+    ) -> Result<(), Error> {
+        let main_gate = self.main_gate();
+        main_gate.one_or_one(ctx, a, b)
+    }
+
+    fn and(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedCondition<N>,
+        b: &AssignedCondition<N>,
+    ) -> Result<AssignedCondition<N>, Error> {
+        let main_gate = self.main_gate();
+        main_gate.and(ctx, a, b)
     }
 
     fn assert_zero(
@@ -813,9 +885,9 @@ mod tests {
                         Range::Remainder,
                     )?;
                     let reduced_1 = &integer_chip.reduce(ctx, overflows)?;
-                    assert_eq!(reduced_1.max_val(), self.rns.max_remainder);
-                    integer_chip.assert_equal(ctx, reduced_0, reduced_1)?;
-                    integer_chip.assert_strict_equal(ctx, reduced_0, reduced_1)?;
+                    assert_eq!(reduced_1.0.max_val(), self.rns.max_remainder);
+                    integer_chip.assert_equal(ctx, reduced_0, &reduced_1.0)?;
+                    integer_chip.assert_strict_equal(ctx, reduced_0, &reduced_1.0)?;
                     Ok(())
                 },
             )?;
@@ -1157,8 +1229,8 @@ mod tests {
                             c_in_field.into(),
                             Range::Remainder,
                         )?;
-                        integer_chip.assert_equal(ctx, &c_0, &c_1)?;
-                        integer_chip.assert_strict_equal(ctx, &c_0, &c_1)?;
+                        integer_chip.assert_equal(ctx, &c_0.0, &c_1)?;
+                        integer_chip.assert_strict_equal(ctx, &c_0.0, &c_1)?;
                     }
 
                     {
@@ -1185,8 +1257,8 @@ mod tests {
                             c_in_field.into(),
                             Range::Remainder,
                         )?;
-                        integer_chip.assert_equal(ctx, &c_0, &c_1)?;
-                        integer_chip.assert_strict_equal(ctx, &c_0, &c_1)?;
+                        integer_chip.assert_equal(ctx, &c_0.0, &c_1)?;
+                        integer_chip.assert_strict_equal(ctx, &c_0.0, &c_1)?;
                     }
 
                     {
@@ -1204,8 +1276,8 @@ mod tests {
                                 integer_chip.assign_integer(ctx, c.into(), Range::Remainder)?;
                             let c_0 = integer_chip.reduce(ctx, &a)?;
                             integer_chip.assert_equal(ctx, &a, &c_1)?;
-                            integer_chip.assert_equal(ctx, &c_0, &c_1)?;
-                            integer_chip.assert_strict_equal(ctx, &c_0, &c_1)?;
+                            integer_chip.assert_equal(ctx, &c_0.0, &c_1)?;
+                            integer_chip.assert_strict_equal(ctx, &c_0.0, &c_1)?;
                         }
                     }
 

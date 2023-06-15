@@ -35,6 +35,15 @@ pub trait IntegerInstructions<
         range: Range,
     ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error>;
 
+    /// Try to assigns an [`Integer`] to a cell in the circuit without range check for the
+    /// appropriate [`Range`].
+    fn try_assign_integer(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        integer: UnassignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+        range: Range,
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error>;
+
     /// Assigns an [`Integer`] constant to a cell in the circuit returning an
     /// [`AssignedInteger`].
     fn assign_constant(
@@ -197,7 +206,7 @@ pub trait IntegerInstructions<
         &self,
         ctx: &mut RegionCtx<'_, N>,
         a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
-    ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error>;
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error>;
 
     /// Constraints that two [`AssignedInteger`] are equal.
     fn assert_equal(
@@ -215,6 +224,14 @@ pub trait IntegerInstructions<
         b: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
     ) -> Result<(), Error>;
 
+    /// Constraints that limbs of two [`AssignedInteger`] are equal.
+    fn is_strict_equal(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+        b: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error>;
+
     /// Constraints that two [`AssignedInteger`] are not equal.
     fn assert_not_equal(
         &self,
@@ -229,6 +246,37 @@ pub trait IntegerInstructions<
         ctx: &mut RegionCtx<'_, N>,
         a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
     ) -> Result<(), Error>;
+
+    /// Check constraints that an [`AssignedInteger`] is not equal to zero
+    fn is_not_zero(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error>;
+
+    /// Check constraints that an [`AssignedInteger`] is not equal to zero
+    fn is_not_zero_without_reduce(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error>;
+
+    /// Enforces one of given two values is `1`
+    /// `(a-1) * (b-1)  = 0`
+    fn one_or_one(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedCondition<N>,
+        b: &AssignedCondition<N>,
+    ) -> Result<(), Error>;
+
+    /// Constraints for AND
+    fn and(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedCondition<N>,
+        b: &AssignedCondition<N>,
+    ) -> Result<AssignedCondition<N>, Error>;
 
     /// Constraints that an [`AssignedInteger`] is equal to zero
     fn assert_zero(
@@ -293,7 +341,7 @@ pub trait IntegerInstructions<
         &self,
         ctx: &mut RegionCtx<'_, N>,
         a: &AssignedInteger<T, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
-    ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error>;
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error>;
 
     /// Applies % 2 to the given input
     fn sign(

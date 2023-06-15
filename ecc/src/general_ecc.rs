@@ -7,10 +7,12 @@ use halo2::arithmetic::CurveAffine;
 use halo2::circuit::{Layouter, Value};
 use halo2::halo2curves::ff::PrimeField;
 use halo2::plonk::Error;
-use integer::maingate::RegionCtx;
+use integer::maingate::{RegionCtx, MainGateInstructions};
 use maingate::{AssignedCondition, MainGate};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+
+use num_bigint::BigUint as big_uint;
 
 mod add;
 mod mul;
@@ -97,6 +99,15 @@ impl<
         e.map(|e| Integer::from_fe(e, self.rns_scalar())).into()
     }
 
+    /// Assign integer for chip
+    pub fn new_unassigned_big(
+        &self,
+        e: big_uint,
+    ) -> UnassignedInteger<Emulated::Scalar, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB> {
+        let big = Integer::from_big(e, self.rns_scalar());
+        Value::known(big).into()
+    }
+
     /// Return `IntegerChip` for the base field of the EC
     pub fn base_field_chip(
         &self,
@@ -171,7 +182,6 @@ impl<
         point: AssignedPoint<Emulated::Base, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
         offset: usize,
     ) -> Result<(), Error> {
-        use integer::maingate::MainGateInstructions;
         let main_gate = self.main_gate();
 
         let mut offset = offset;
@@ -209,19 +219,34 @@ impl<
         ctx: &mut RegionCtx<'_, N>,
         point: Value<Emulated>,
     ) -> Result<AssignedPoint<Emulated::Base, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error> {
-        let integer_chip = self.base_field_chip();
+        let maingate = self.main_gate();
 
         let point = point.map(|point| self.to_rns_point(point));
         let (x, y) = point
             .map(|point| (point.x().clone(), point.y().clone()))
             .unzip();
 
-        let x = integer_chip.assign_integer(ctx, x.into(), Range::Remainder)?;
-        let y = integer_chip.assign_integer(ctx, y.into(), Range::Remainder)?;
-
-        let point = AssignedPoint::new(x, y);
-        self.assert_is_on_curve(ctx, &point)?;
+        let (point, is_on_curve) = self.assign_x_y(ctx, x.into(), y.into())?;
+        maingate.assert_not_zero(ctx, &is_on_curve)?;
         Ok(point)
+    }
+
+    /// Takes `Point.x` and `Point.y` of the EC and returns it as `AssignedPoint`
+    pub fn assign_x_y(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        x: UnassignedInteger<<Emulated as CurveAffine>::Base, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+        y: UnassignedInteger<<Emulated as CurveAffine>::Base, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<(AssignedPoint<Emulated::Base, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
+        let integer_chip = self.base_field_chip();
+
+        let (x, is_x_valid) = integer_chip.try_assign_integer(ctx, x.into(), Range::Remainder)?;
+        let (y, is_y_valid) = integer_chip.try_assign_integer(ctx, y.into(), Range::Remainder)?;
+        let is_valid = integer_chip.and(ctx, &is_x_valid, &is_y_valid)?;
+        let point = AssignedPoint::new(x, y);
+        let is_on_curve = self.is_on_curve(ctx, &point)?;
+        let is_valid = integer_chip.and(ctx, &is_valid, &is_on_curve)?;
+        Ok((point, is_valid))
     }
 
     /// Assigns the auxiliary generator point
@@ -270,6 +295,21 @@ impl<
         let x_cube_b = &integer_chip.add_constant(ctx, x_cube, &self.parameter_b())?;
         integer_chip.assert_equal(ctx, x_cube_b, y_square)?;
         Ok(())
+    }
+
+    /// Constraints to check if `AssignedPoint` is on curve
+    pub fn is_on_curve(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        point: &AssignedPoint<Emulated::Base, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<AssignedCondition<N>, Error> {
+        let integer_chip = self.base_field_chip();
+
+        let y_square = &integer_chip.square(ctx, point.y())?;
+        let x_square = &integer_chip.square(ctx, point.x())?;
+        let x_cube = &integer_chip.mul(ctx, point.x(), x_square)?;
+        let x_cube_b = &integer_chip.add_constant(ctx, x_cube, &self.parameter_b())?;
+        integer_chip.is_strict_equal(ctx, x_cube_b, y_square)
     }
 
     /// Constraints assert two `AssignedPoint`s are equal
@@ -323,7 +363,7 @@ impl<
         let integer_chip = self.base_field_chip();
         let x = integer_chip.reduce(ctx, point.x())?;
         let y = integer_chip.reduce(ctx, point.y())?;
-        Ok(AssignedPoint::new(x, y))
+        Ok(AssignedPoint::new(x.0, y.0))
     }
 
     /// Adds 2 distinct `AssignedPoints`

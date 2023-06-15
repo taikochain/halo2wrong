@@ -2,7 +2,7 @@ use crate::{
     curves::ff::{FromUniformBytes, PrimeField},
     halo2::{
         circuit::Value,
-        dev::MockProver,
+        dev::{MockProver, VerifyFailure},
         plonk::{
             Advice, Any, Assigned, Assignment, Challenge, Circuit, Column, ConstraintSystem, Error,
             Fixed, FloorPlanner, Instance, Selector,
@@ -67,14 +67,11 @@ pub fn compose(input: Vec<big_uint>, bit_len: usize) -> big_uint {
 pub fn mock_prover_verify<F: FromUniformBytes<64> + Ord, C: Circuit<F>>(
     circuit: &C,
     instance: Vec<Vec<F>>,
-) {
+) -> Result<(), Vec<VerifyFailure>> {
     let dimension = DimensionMeasurement::measure(circuit).unwrap();
     let prover = MockProver::run(dimension.k(), circuit, instance)
         .unwrap_or_else(|err| panic!("{:#?}", err));
-    assert_eq!(
-        prover.verify_at_rows_par(dimension.advice_range(), dimension.advice_range()),
-        Ok(())
-    )
+    prover.verify_at_rows_par(dimension.advice_range(), dimension.advice_range())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

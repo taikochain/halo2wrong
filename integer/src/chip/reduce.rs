@@ -2,7 +2,7 @@ use super::{IntegerChip, IntegerInstructions, Range};
 use crate::rns::MaybeReduced;
 use crate::{AssignedInteger, PrimeField};
 use halo2::plonk::Error;
-use maingate::{halo2, AssignedValue, MainGateInstructions, RangeInstructions, RegionCtx, Term};
+use maingate::{halo2, AssignedCondition, AssignedValue, MainGateInstructions, RangeInstructions, RegionCtx, Term};
 
 impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_LIMB: usize>
     IntegerChip<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>
@@ -34,9 +34,66 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
             assert!(a.max_val() < max_reducible_value);
         }
         if exceeds_max_limb_value {
-            self.reduce(ctx, a)
+            let result = self.reduce(ctx, a)?;
+            Ok(result.0)
         } else {
             Ok(self.new_assigned_integer(a.limbs(), a.native().clone()))
+        }
+    }
+
+    /// Try to reduces an [`AssignedInteger`] if any of its limbs values is greater
+    /// than the [`Rns`] `max_unreduced_limb`.
+    ///
+    /// Panics if the value of the integer is greater than [`Rns`]
+    /// `max_reducible_value`.
+    pub(super) fn try_reduce(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
+        let main_gate = self.main_gate();
+
+        let (a, is_reduce_if_limb_values_succeeded) = self.try_reduce_if_limb_values_exceeds_reduced(ctx, a)?;
+        let (a, is_reduce_if_max_operand_value_succeeded) = self.try_reduce_if_max_operand_value_exceeds(ctx, &a)?;
+        let is_reduce_succeeded = main_gate.and(ctx, &is_reduce_if_limb_values_succeeded, &is_reduce_if_max_operand_value_succeeded)?;
+
+        Ok((a, is_reduce_succeeded))
+    }
+
+    /// Try to reduces an [`AssignedInteger`] if any of its limbs values is greater
+    /// than the [`Rns`] `max_unreduced_limb`.
+    ///
+    /// Panics if the value of the integer is greater than [`Rns`]
+    /// `max_reducible_value`.
+    pub(super) fn try_reduce_if_limb_values_exceeds_reduced(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
+        let exceeds_max_limb_value = a
+            .limbs
+            .iter()
+            .any(|limb| limb.max_val() > self.rns.max_reduced_limb);
+
+        // Soft sanity check for completeness
+        // Reduction quotient is limited upto a dense single limb. It is quite possible
+        // to make it more than a single limb. However even single limb will
+        // support quite amount of lazy additions and make reduction process
+        // much easier.
+        let max_reduction_quotient = self.rns.max_reduced_limb.clone();
+        let max_reducible_value =
+            max_reduction_quotient * &self.rns.wrong_modulus + &self.rns.max_remainder;
+        let is_valid = self.assign_constant(ctx, ((a.max_val() < max_reducible_value) as u64).into())?;
+        let is_valid = self.is_not_zero_without_reduce(ctx, &is_valid)?;
+
+        if exceeds_max_limb_value {
+            let (result, is_reduce_succeeded) = self.reduce(ctx, a)?;
+            let is_valid = self.and(ctx, &is_valid, &is_reduce_succeeded)?;
+            Ok((result, is_valid))
+        } else {
+            let zero = self.assign_constant(ctx, W::ZERO)?;
+            let zero = self.is_strict_equal(ctx, &zero.clone(), &zero)?;
+            Ok((self.new_assigned_integer(a.limbs(), a.native().clone()), zero))
         }
     }
 
@@ -52,7 +109,8 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
             .iter()
             .any(|limb| limb.max_val() > self.rns.max_reduced_limb);
         if exceeds_max_limb_value {
-            self.reduce(ctx, a)
+            let result = self.reduce(ctx, a)?;
+            Ok(result.0)
         } else {
             Ok(self.new_assigned_integer(a.limbs(), a.native().clone()))
         }
@@ -67,9 +125,41 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
     ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error> {
         let exceeds_max_value = a.max_val() > self.rns.max_operand;
         if exceeds_max_value {
-            self.reduce(ctx, a)
+            let result = self.reduce(ctx, a)?;
+            Ok(result.0)
         } else {
             Ok(self.new_assigned_integer(a.limbs(), a.native().clone()))
+        }
+    }
+
+    /// Try to reduces an [`AssignedInteger`] if any of its max value is greater
+    /// than the [`Rns`] `max_operand`.
+    pub(super) fn try_reduce_if_max_operand_value_exceeds(
+        &self,
+        ctx: &mut RegionCtx<'_, N>,
+        a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
+        let exceeds_max_value = a.max_val() > self.rns.max_operand;
+
+        // Soft sanity check for completeness
+        // Reduction quotient is limited upto a dense single limb. It is quite possible
+        // to make it more than a single limb. However even single limb will
+        // support quite amount of lazy additions and make reduction process
+        // much easier.
+        let max_reduction_quotient = self.rns.max_reduced_limb.clone();
+        let max_reducible_value =
+            max_reduction_quotient * &self.rns.wrong_modulus + &self.rns.max_remainder;
+        let is_valid = self.assign_constant(ctx, ((a.max_val() < max_reducible_value) as u64).into())?;
+        let is_valid = self.is_not_zero_without_reduce(ctx, &is_valid)?;
+
+        if exceeds_max_value {
+            let (result, is_reduce_succeeded) = self.reduce(ctx, a)?;
+            let is_valid = self.and(ctx, &is_valid, &is_reduce_succeeded)?;
+            Ok((result, is_valid))
+        } else {
+            let zero = self.assign_constant(ctx, W::ZERO)?;
+            let zero = self.is_strict_equal(ctx, &zero.clone(), &zero)?;
+            Ok((self.new_assigned_integer(a.limbs(), a.native().clone()), zero))
         }
     }
 
@@ -77,7 +167,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         &self,
         ctx: &mut RegionCtx<'_, N>,
         a: &AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
-    ) -> Result<AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, Error> {
+    ) -> Result<(AssignedInteger<W, N, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, AssignedCondition<N>), Error> {
         let main_gate = self.main_gate();
         let (zero, one) = (N::ZERO, N::ONE);
 
@@ -86,9 +176,13 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         let quotient = witness.short();
         let result = witness.result();
 
+        // Add soft check here
         // Apply ranges
         let range_chip = self.range_chip();
-        let result = self.assign_integer(ctx, result.into(), Range::Remainder)?;
+
+        // Change to try_assign_integer that has soft check
+        let result = self.try_assign_integer(ctx, result.into(), Range::Remainder)?;
+
         let quotient = range_chip.assign(ctx, quotient, Self::sublimb_bit_len(), BIT_LEN_LIMB)?;
         let residues = witness
             .residues()
@@ -118,7 +212,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
             ctx,
             &t.try_into()
                 .expect("Unexpected failure in AssignedCell -> AssignedValue conversion"),
-            &result,
+            &result.0,
             residues,
         )?;
 
@@ -128,7 +222,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
             &[
                 Term::Assigned(a.native(), -one),
                 Term::Assigned(&quotient, self.rns.wrong_modulus_in_native_modulus),
-                Term::Assigned(result.native(), one),
+                Term::Assigned(result.0.native(), one),
             ],
             zero,
         )?;

@@ -30,6 +30,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         let comparision_witness = integer.as_ref().map(|integer| integer.compare_to_modulus());
         let result = comparision_witness.as_ref().map(|r| r.result.clone());
         let result = &self.assign_integer_generic(ctx, result.into(), Range::Remainder)?;
+        let result = &result.0;
 
         // assert borrow values are bits
         let borrow = comparision_witness.as_ref().map(|r| r.borrow);

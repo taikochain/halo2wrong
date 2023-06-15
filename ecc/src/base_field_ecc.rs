@@ -263,7 +263,7 @@ impl<C: CurveAffine, const NUMBER_OF_LIMBS: usize, const BIT_LEN_LIMB: usize>
         let integer_chip = self.integer_chip();
         let x = integer_chip.reduce(ctx, point.x())?;
         let y = integer_chip.reduce(ctx, point.y())?;
-        Ok(AssignedPoint::new(x, y))
+        Ok(AssignedPoint::new(x.0, y.0))
     }
 
     /// Adds 2 distinct `AssignedPoints`

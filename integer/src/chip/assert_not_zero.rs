@@ -34,8 +34,8 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         // r = 0 <-> r % 2 ^ 64 = 0 /\ r % native_modulus = 0
         // r <> 0 <-> r % 2 ^ 64 <> 0 \/ r % native_modulus <> 0
         // r <> 0 <-> invert(r.limb(0)) \/ invert(r.native())
-        let cond_zero_0 = main_gate.is_zero(ctx, r.limb(0))?;
-        let cond_zero_1 = main_gate.is_zero(ctx, r.native())?;
+        let cond_zero_0 = main_gate.is_zero(ctx, r.0.limb(0))?;
+        let cond_zero_1 = main_gate.is_zero(ctx, r.0.native())?;
 
         // one of them might be succeeded, i.e. cond_zero_0 * cond_zero_1 = 0
         main_gate.nand(ctx, &cond_zero_0, &cond_zero_1)?;
@@ -46,12 +46,12 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
         // invert(r.limb(0) - wrong_modulus[0]) \/ invert(r.native() -
         // wrong_modulus.native())
         let wrong_modulus = self.rns.wrong_modulus_decomposed;
-        let limb_diff = r.limbs[0].value().map(|value| value - wrong_modulus[0]);
+        let limb_diff = r.0.limbs[0].value().map(|value| value - wrong_modulus[0]);
         let limb_diff = main_gate
             .apply(
                 ctx,
                 [
-                    Term::Assigned(r.limb(0), one),
+                    Term::Assigned(r.0.limb(0), one),
                     Term::Unassigned(limb_diff, -one),
                     Term::Zero,
                     Term::Zero,
@@ -62,7 +62,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
             )?
             .swap_remove(1);
 
-        let native_diff = r
+        let native_diff = r.0
             .native()
             .value()
             .map(|value| *value - self.rns.wrong_modulus_in_native_modulus);
@@ -70,7 +70,7 @@ impl<W: PrimeField, N: PrimeField, const NUMBER_OF_LIMBS: usize, const BIT_LEN_L
             .apply(
                 ctx,
                 [
-                    Term::Assigned(r.native(), one),
+                    Term::Assigned(r.0.native(), one),
                     Term::Unassigned(native_diff, -one),
                     Term::Zero,
                     Term::Zero,
